@@ -11,7 +11,6 @@
 
 #include <cstddef>
 #include <memory>
-#include <string>
 #include <vector>
 
 #include "absl/log/absl_check.h"
@@ -26,6 +25,7 @@
 #include "google/protobuf/descriptor.pb.h"
 #include "google/protobuf/io/printer.h"
 #include "google/protobuf/wire_format.h"
+#include "google/protobuf/wire_format_lite.h"
 
 namespace google {
 namespace protobuf {
@@ -162,6 +162,7 @@ class SingularPrimitive final : public FieldGeneratorBase {
   void GenerateInlineAccessorDefinitions(io::Printer* p) const override;
   void GenerateSerializeWithCachedSizesToArray(io::Printer* p) const override;
   void GenerateByteSize(io::Printer* p) const override;
+  void GenerateByteSizeV2(io::Printer* p) const override;
 
  private:
   const Options* opts_;
@@ -286,6 +287,16 @@ void SingularPrimitive::GenerateByteSize(io::Printer* p) const {
   )cc");
 }
 
+void SingularPrimitive::GenerateByteSizeV2(io::Printer* p) const {
+  // |tag|1B| |field_number|4B| |payload...|
+  p->Emit({{"size",
+            kV2SingularFieldTagSize +
+                static_cast<size_t>(CppTypeToV2FieldSize(field_->cpp_type()))}},
+          R"cc(
+            total_size += $size$;
+          )cc");
+}
+
 class RepeatedPrimitive final : public FieldGeneratorBase {
  public:
   RepeatedPrimitive(const FieldDescriptor* field, const Options& opts,
@@ -402,6 +413,7 @@ class RepeatedPrimitive final : public FieldGeneratorBase {
   void GenerateInlineAccessorDefinitions(io::Printer* p) const override;
   void GenerateSerializeWithCachedSizesToArray(io::Printer* p) const override;
   void GenerateByteSize(io::Printer* p) const override;
+  void GenerateByteSizeV2(io::Printer* p) const override;
 
  private:
   bool HasCachedSize() const {
@@ -641,6 +653,15 @@ void RepeatedPrimitive::GenerateByteSize(io::Printer* p) const {
         std::size_t data_size = $data_size$;
         std::size_t tag_size = $tag_size$;
         total_size += tag_size + data_size;
+      )cc");
+}
+
+void RepeatedPrimitive::GenerateByteSizeV2(io::Printer* p) const {
+  // |tag|1B| |field_number|4B| |count|4B| |length|4B| |payload|...
+  p->Emit(
+      R"cc(
+        total_size += ::_pbi::WireFormatLite::RepeatedNumericByteSizeV2(
+            this_._internal_$name$());
       )cc");
 }
 }  // namespace

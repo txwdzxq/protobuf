@@ -5,10 +5,12 @@
 // license that can be found in the LICENSE file or at
 // https://developers.google.com/open-source/licenses/bsd
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "absl/log/absl_check.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
@@ -168,6 +170,7 @@ class Map : public FieldGeneratorBase {
   void GenerateInlineAccessorDefinitions(io::Printer* p) const override;
   void GenerateSerializeWithCachedSizesToArray(io::Printer* p) const override;
   void GenerateByteSize(io::Printer* p) const override;
+  void GenerateByteSizeV2(io::Printer* p) const override;
 
  private:
   const FieldDescriptor* key_;
@@ -312,6 +315,123 @@ void Map::GenerateByteSize(io::Printer* p) const {
           total_size += $Funcs$::ByteSizeLong(entry.first, entry.second);
         }
       )cc");
+}
+
+bool IsFixedWidth(const FieldDescriptor* field) {
+  auto cpp_type = field->cpp_type();
+  return cpp_type == FieldDescriptor::CPPTYPE_INT32 ||
+         cpp_type == FieldDescriptor::CPPTYPE_INT64 ||
+         cpp_type == FieldDescriptor::CPPTYPE_UINT32 ||
+         cpp_type == FieldDescriptor::CPPTYPE_UINT64 ||
+         cpp_type == FieldDescriptor::CPPTYPE_DOUBLE ||
+         cpp_type == FieldDescriptor::CPPTYPE_FLOAT ||
+         cpp_type == FieldDescriptor::CPPTYPE_BOOL ||
+         cpp_type == FieldDescriptor::CPPTYPE_ENUM;
+}
+
+enum MapFieldType {
+  kKey,
+  kValue,
+};
+
+// Emits code for either key (first) or value (second) of a map entry as its
+// size is variable (string or message). It assumes the map is iterated via
+// "entry".
+void EmitUpdateByteSizeV2ForVariableMapType(const FieldDescriptor* field,
+                                            MapFieldType type, io::Printer* p) {
+  ABSL_DCHECK(field->cpp_type() == FieldDescriptor::CPPTYPE_STRING ||
+              field->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE);
+
+  auto v = p->WithVars({{"name", type == kKey ? "first" : "second"}});
+  if (field->cpp_type() == FieldDescriptor::CPPTYPE_STRING) {
+    p->Emit(
+        R"cc(
+          map_size += entry.$name$.size();
+        )cc");
+  } else {
+    p->Emit(
+        R"cc(
+          map_size += entry.$name$.ByteSizeV2Message();
+        )cc");
+  }
+}
+
+void Map::GenerateByteSizeV2(io::Printer* p) const {
+  // This specialization to handle fixed-width key / value is required to work
+  // around missed-optimization by compiler (demonstrated by
+  // https://godbolt.org/z/PvbsrYE3W).
+  auto v = p->WithVars(
+      {{"tag_size", kV2MapFieldTagSize}, {"length", kV2LengthSize}});
+  if (IsFixedWidth(key_) && IsFixedWidth(val_)) {
+    // Both key and value are fixed-width. Use pre-calculated "entry" size.
+    p->Emit({{"entry", CppTypeToV2FieldSize(key_->cpp_type()) +
+                           CppTypeToV2FieldSize(val_->cpp_type())}},
+            R"cc(
+              if (this_._internal_$name$_size() > 0) {
+                total_size += $tag_size$ + $entry$ * this_._internal_$name$_size();
+              }
+            )cc");
+  } else if (IsFixedWidth(key_)) {
+    // Value types are either string or message.
+    ABSL_DCHECK(val_->cpp_type() == FieldDescriptor::CPPTYPE_STRING ||
+                val_->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE);
+
+    p->Emit(
+        {{"key", CppTypeToV2FieldSize(key_->cpp_type())},
+         {"update_variable_val",
+          [&] { EmitUpdateByteSizeV2ForVariableMapType(val_, kValue, p); }}},
+        R"cc(
+
+          if (this_._internal_$name$_size() > 0) {
+            size_t map_size = $tag_size$;
+            map_size += this_._internal_$name$_size() * ($key$ + $length$);
+            for (const auto& entry : this_._internal_$name$()) {
+              $update_variable_val$;
+            }
+            total_size += map_size;
+          }
+        )cc");
+  } else if (IsFixedWidth(val_)) {
+    // Key is string.
+    ABSL_DCHECK(key_->cpp_type() == FieldDescriptor::CPPTYPE_STRING);
+
+    p->Emit({{"val", CppTypeToV2FieldSize(val_->cpp_type())},
+             {"update_variable_key",
+              [&] { EmitUpdateByteSizeV2ForVariableMapType(key_, kKey, p); }}},
+            R"cc(
+              if (this_._internal_$name$_size() > 0) {
+                size_t map_size = $tag_size$;
+                map_size += this_._internal_$name$_size() * ($length$ + $val$);
+                for (const auto& entry : this_._internal_$name$()) {
+                  $update_variable_key$;
+                }
+                total_size += map_size;
+              }
+            )cc");
+  } else {
+    // Key is string.
+    ABSL_DCHECK(key_->cpp_type() == FieldDescriptor::CPPTYPE_STRING);
+    // Value types are either string or message.
+    ABSL_DCHECK(val_->cpp_type() == FieldDescriptor::CPPTYPE_STRING ||
+                val_->cpp_type() == FieldDescriptor::CPPTYPE_MESSAGE);
+
+    p->Emit(
+        {{"update_variable_key",
+          [&] { EmitUpdateByteSizeV2ForVariableMapType(key_, kKey, p); }},
+         {"update_variable_val",
+          [&] { EmitUpdateByteSizeV2ForVariableMapType(val_, kValue, p); }}},
+        R"cc(
+          if (this_._internal_$name$_size() > 0) {
+            size_t map_size = $tag_size$;
+            map_size += this_._internal_$name$_size() * 2 * $length$;
+            for (const auto& entry : this_._internal_$name$()) {
+              $update_variable_key$;
+              $update_variable_val$;
+            }
+            total_size += map_size;
+          }
+        )cc");
+  }
 }
 }  // namespace
 
