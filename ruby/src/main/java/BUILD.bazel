@@ -9,7 +9,7 @@ java_library(
         "google/ProtobufJavaService.java",
     ],
     target_compatible_with = select({
-        "@rules_ruby//ruby/runtime:config_jruby": [],
+        "@ruby//engine:jruby": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     visibility = ["//ruby:__subpackages__"],
