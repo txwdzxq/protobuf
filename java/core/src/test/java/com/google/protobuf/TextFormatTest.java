@@ -1976,6 +1976,20 @@ public class TextFormatTest {
     }
   }
 
+  @Test
+  public void testMapDynamicMessage() throws Exception {
+    TestMap message =
+        TestMap.newBuilder()
+            .putInt32ToStringField(30, "cherry")
+            .putInt32ToStringField(10, "apple")
+            .putInt32ToStringField(20, "banana")
+            .build();
+    DynamicMessage dynamic =
+        DynamicMessage.parseFrom(TestMap.getDescriptor(), message.toByteString());
+    assertThat(TextFormat.printer().printToString(dynamic))
+        .isEqualTo(TextFormat.printer().printToString(message));
+  }
+
   // =======================================================================
   // test location information
 
